@@ -4644,6 +4644,78 @@ sub EncodeFileName($$;$)
     return 0;
 }
 
+sub ContainsWildcards($)
+{
+    my $path = shift;
+
+    # translate forward slashes to backslashes to test for Windows long path prefix
+    $path =~ tr/\//\\/;
+
+    # if this is a Windows path with the long path prefix, then wildcards are not supported
+    if ($^O eq 'MSWin32' and $path =~ /^\\\\\?\\/) {
+        return 0
+    }
+
+    return $path =~ /[*?]/;
+}
+
+#------------------------------------------------------------------------------
+# Mainly for Windows: Rebuild a path as an absolute long path to be usable in system calls that support long paths
+# Otherwise, convert the path delimiters to forward slashes
+# Inputs: 0) path
+# Returns: normalized path
+sub NormalizePath
+{
+    my $path = shift;
+    if ($^O eq 'MSWin32') {
+        $path =~ s{/}{\\}g;
+
+        if (ContainsWildcards $path or $path =~ /^\\\\\?\\/) {
+            return $path;
+        }
+
+        # already absolute path -> add long path prefix and return
+        if ($path =~ /^[a-z]:/i) {
+            $path = "\\\\?\\$path";
+            return $path;
+        }
+
+        # need current working directory to build absolute path
+        if (not {eval { require Cwd }}) {
+            return $path;
+        }
+
+        my $cwd = Cwd::getcwd();
+        $cwd =~ s{/}{\\}g;
+
+        my @cwdParts = split /\\/, $cwd;
+        my @pathParts = split /\\/, $path;
+        my @combinedParts = @cwdParts;
+
+        foreach my $part (@pathParts) {
+            if ($part eq '.' or $part eq '') {
+                next;
+            }
+            elsif ($part eq '..') {
+                if (@combinedParts > 1) {
+                    pop @combinedParts;
+                }
+            }
+            else {
+                push @combinedParts, $part;
+            }
+        }
+
+        $path = join '\\', @combinedParts;
+        $path = "\\\\?\\$path";
+    }
+    else {
+        $path =~ s{\\}{/}g;
+    }
+
+    return $path;
+}
+
 #------------------------------------------------------------------------------
 # Modified perl open() routine to properly handle special characters in file names
 # Inputs: 0) ExifTool ref, 1) filehandle, 2) filename,
@@ -4660,6 +4732,7 @@ sub Open($*$;$)
     $mode = (($file =~ /\|$/ and $$self{TRUST_PIPE}) ? '' : '<') unless $mode;
     delete $$self{TRUST_PIPE};
     if ($mode) {
+        $file = NormalizePath $file;
         if ($self->EncodeFileName($file)) {
             # handle Windows Unicode file name
             local $SIG{'__WARN__'} = \&SetWarning;
@@ -4712,6 +4785,7 @@ sub Exists($$;$)
 {
     my ($self, $file, $writing) = @_;
 
+    $file = NormalizePath $file;
     if ($self->EncodeFileName($file)) {
         local $SIG{'__WARN__'} = \&SetWarning;
         my $wh = eval { Win32API::File::CreateFileW($file,
@@ -4737,6 +4811,7 @@ sub Exists($$;$)
 sub IsDirectory($$)
 {
     my ($et, $file) = @_;
+    $file = NormalizePath $file;
     if ($et->EncodeFileName($file)) {
         local $SIG{'__WARN__'} = \&SetWarning;
         my $attrs = eval { Win32API::File::GetFileAttributesW($file) };
